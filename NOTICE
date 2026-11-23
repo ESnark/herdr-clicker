@@ -1,0 +1,11 @@
+herdr-clicker
+Copyright 2026 ESnark
+
+This project contains modified versions of the `main` layout and the `agents`,
+`spaces` and `files` mods shipped with the Herdr app
+(https://github.com/herdrdev/herdr-app), licensed under the Apache License,
+Version 2.0. Each modified mod says at its top what changed.
+
+mods/clicker-files/vendor/beautiful-mermaid.js bundles beautiful-mermaid (MIT),
+elkjs (EPL-2.0) and entities (BSD-2-Clause), patched to run in Herdr's mod
+runtime. Their licenses are in mods/clicker-files/vendor/LICENSES.md.
