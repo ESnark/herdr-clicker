@@ -1,9 +1,10 @@
 // clicker-spaces: modified from Herdr's shipped `spaces` mod (herdrdev/herdr-app, Apache-2.0).
 // Changes: resting the pointer on a space shows a card of its agents to the right; click one to focus it.
+// Each row ends with up to 5 marks for its agents that are working, need you, or finished unseen.
 //
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
 // grouped by machine when more than one is known. After a space's name, the repo
-// its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
+// its first terminal is in now, only where unusual: branch, ahead/behind. Click to
 // switch, right-click for its menu, drag to reorder.
 
 import { View, div, svg, image } from "gpui-kit";
@@ -96,6 +97,21 @@ function agentStatus(t, a) {
   if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
   if (a.status === "done") return div().size(7).mx(3).flex_none().rounded(4).bg(t.done ?? t.dim);
   return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
+}
+
+// A space row's live marks: one per agent that is working, needs you, or finished
+// unseen (done). Idle agents (already looked at) get none. The most urgent come
+// first, so the cap drops spinners before a "needs you" or an unseen "done".
+const MARKS_MAX = 5;
+const MARK_RANK = { blocked: 0, done: 1, working: 2 };
+function rowMarks(list, t) {
+  const live = list.filter((a) => a.status in MARK_RANK).sort((a, b) => MARK_RANK[a.status] - MARK_RANK[b.status]).slice(0, MARKS_MAX);
+  if (!live.length) return null;
+  return h_flex().flex_none().gap(3).items_center().children(live.map((a) => {
+    if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+    if (a.status === "blocked") return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
+    return div().size(7).mx(2).flex_none().rounded(4).bg(t.done ?? t.dim);
+  }));
 }
 
 export default class Spaces extends View {
@@ -536,6 +552,7 @@ export default class Spaces extends View {
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    const marks = rowMarks(this.agentsBySpace?.get(w.id) ?? [], t);
     // The row ends 8px inside the sidebar (the list's padding): 14 clears its edge.
     return this.withCard(w, v_flex()
       .relative()
@@ -584,7 +601,8 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).flex_none().text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_initial().min_w(SIDE_MIN).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+          .when(Boolean(marks), (el) => el.child(marks)),
       ), t, 14);
   }
 

@@ -46,6 +46,10 @@ agents: program icon, a label (the tab's name if someone named it, else the agen
 title, else the program), and the status mark. Clicking one focuses its pane (switching
 space and tab). The card closes 250 ms after the pointer leaves both row and card, so the
 pointer can cross the gap. Spaces without agents get no card. Past 320 px the list scrolls.
+Each row also ends with one mark per agent that needs attention, at most 5: a red `!` for
+one waiting on you, a blue dot for one that finished while you weren't looking, a spinner for
+one working. Agents you have already looked at get none. The most urgent come first, so past
+5 the spinners drop first. The folded rail keeps its single dot.
 
 **Files panel.**
 - *Worktrees.* In a git repo the header shows a select with the shown worktree's branch.
