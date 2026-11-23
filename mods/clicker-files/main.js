@@ -1,5 +1,6 @@
 // clicker-files: modified from Herdr's shipped `files` mod (herdrdev/herdr-app, Apache-2.0).
-// Changes: a worktree select, Preview/Markdown tabs, mermaid diagrams and images in the preview.
+// Changes: a worktree select, a preview that opens in a larger dialog with Preview/Markdown tabs,
+// mermaid diagrams and images in the preview.
 //
 // A lazy file browser for the focused pane's worktree, with bounded read-only previews.
 //
@@ -9,12 +10,14 @@
 // another pane or that pane moves to another worktree; then it follows again.
 // The shown worktree is published as shared "clicker-files.worktree" for other mods.
 //
-// Markdown and mermaid files (.mmd, .mermaid) open on a Preview tab. Mermaid diagrams (whole
+// Markdown and mermaid files (.mmd, .mermaid) always show rendered in the panel. The expand
+// button at the header's right opens the same file in a dialog (this mod again, with
+// `props().view`), which has the Preview | Markdown (Source) tabs. Mermaid diagrams (whole
 // files and ```mermaid blocks) are drawn by ./mermaid.js without a browser; images on lines
 // of their own are copied into .cache/ (the app draws images from its own folder only).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, Popover, TextView } from "gpui-base";
-import { spaces, panes, focused, agents, exec, readTextFile, watchFolder, theme, settings, window, home, appHome, checking, setShared } from "herdr";
+import { spaces, panes, focused, agents, exec, readTextFile, watchFolder, theme, settings, window, home, appHome, checking, setShared, openOverlay, closeOverlay, props, notify, run } from "herdr";
 import * as fs from "fs/promises";
 import { splitMarkdown, hash } from "./blocks.js";
 import { hashBytes, fromBase64, imageSize } from "./media.js";
@@ -34,6 +37,8 @@ const ASK_EVERY = 3000;
 const MARKDOWN = /\.(md|markdown|mdown|mkd|mkdn|mdx)$/i;
 // Mermaid files open on a Preview tab (the diagram) beside a Source tab.
 const MERMAID = /\.(mmd|mermaid)$/i;
+// HTML files show their source; a header button opens them in the system's browser.
+const HTML = /\.(html?|xhtml)$/i;
 // Rendering is slower than showing source: a very long file previews its first part.
 const PREVIEW_LIMIT = 200000;
 // Drawn diagrams and copied images, by content: hidden, so writing them doesn't reload the mod.
@@ -117,13 +122,28 @@ export default class Files extends View {
     this.pictures = new Map(); // spot(on, image path) -> { state: "ok" | "error", path, width, height, error }
     this.previewWidth = 0; // the preview's width, for fitting diagrams and images
     this.redrawUntil = 0; // see image()
+    // Redraws for a moment after a new image is first drawn (see image()). A timer set up here
+    // keeps working; outside that moment a tick does nothing.
+    cx.timer.every(250, cx => { if (this.redrawUntil > Date.now()) cx.notify(); });
+    // The larger view (a dialog): one file of one worktree, given by the panel that opened it.
+    const view = _props?.view ?? props()?.view;
+    if (view?.file && view.root) {
+      this.view = view;
+      this.root = view.root; this.on = view.on ?? null;
+      this.context = { key: "view", cwd: view.root, on: this.on };
+      this.show(view.file, cx);
+      // Follows saves, as the panel does.
+      cx.timer.every(10000, cx => {
+        if (!this.file) return;
+        const context = this.context;
+        cx.spawn(async cx => { try { await this.readFile(this.file, context, cx); } catch {} finally { cx.notify(); } });
+      });
+      return;
+    }
     // Cache files made over a month ago go; one still shown is made again when next needed.
     if (!checking()) exec("find", [`${appHome()}/${CACHE}`, "-type", "f", "-mtime", "+30", "-delete"]).catch(() => {});
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
-    // Redraws for a moment after a new image is first drawn (see image()). A timer set up here
-    // keeps working; outside that moment a tick does nothing.
-    cx.timer.every(250, cx => { if (this.redrawUntil > Date.now()) cx.notify(); });
   }
 
   // What the panel shows now. `root`: the picked worktree while the pick holds, else the
@@ -142,7 +162,10 @@ export default class Files extends View {
     return { ...loc, root: this.pick?.path ?? auto, auto, repo: g, trees };
   }
 
-  key(tg = this.target()) {
+  key(tg) {
+    // The larger view keeps the worktree it was opened with.
+    if (this.view) return "view";
+    tg ??= this.target();
     return JSON.stringify({ root: tg.root ?? null, on: tg.on ?? null, space: tg.space ?? null });
   }
 
@@ -281,7 +304,7 @@ export default class Files extends View {
   }
 
   show(path, cx) {
-    this.code?.release(); this.code = null; this.file = path; this.fileError = null; this.text = null;
+    this.code?.release(); this.code = null; this.file = path; this.fileError = null; this.text = null; this.lines = null; this.pop = null;
     // Opening a file looks at its images again (they're cached by content, so this is cheap).
     if (path) this.pictures.clear();
     if (!path || !cx) return;
@@ -305,6 +328,7 @@ export default class Files extends View {
       const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
       this.code?.release();
       this.text = text; this.fileError = null;
+      this.lines = null; this.pop = null; // a new source view has no selection
       this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
         value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
         font_family: settings().font_family, font_size: 12,
@@ -341,7 +365,7 @@ export default class Files extends View {
   previewBlocks(kind) {
     if (kind === "mermaid") return { blocks: [{ kind: "mermaid", source: this.text ?? "" }], refs: "" };
     const full = this.text ?? "";
-    const text = full.length > PREVIEW_LIMIT ? full.slice(0, PREVIEW_LIMIT) + "\n\n*… (preview truncated: the Markdown tab shows more)*" : full;
+    const text = full.length > PREVIEW_LIMIT ? full.slice(0, PREVIEW_LIMIT) + "\n\n*… (preview truncated: the larger view's Markdown tab shows more)*" : full;
     if (this.splitText !== text) { this.split = splitMarkdown(text); this.splitText = text; }
     return this.split;
   }
@@ -385,13 +409,161 @@ export default class Files extends View {
     return true;
   }
 
-  // Preview | Markdown (Source for a mermaid file), at the header's right end. The choice holds for the next ones too.
+  // The agent a reference goes to: the focused pane's, when it runs on the file's machine
+  // (a path means nothing on another one). With its pane's folder, for a shorter path.
+  referTarget() {
+    if (!this.file || !this.root) return null;
+    const paneId = focused()?.pane;
+    if (!paneId) return null;
+    const agent = agents().find(a => a.pane === paneId);
+    if (!agent) return null;
+    const machine = agent.address.includes("/") ? agent.address.split("/")[0] : null;
+    if (machine !== (this.on ?? null)) return null;
+    return { agent, cwd: panes().find(p => p.pane === paneId)?.cwd ?? null };
+  }
+
+  // The lines selected in the source view, or null when nothing is. A selection that ends at
+  // the start of a line (a drag down to the next line's edge) leaves that line out.
+  selectedLines() {
+    if (!this.code) return null;
+    const r = this.code.selected_range();
+    const a = Math.min(r?.start ?? 0, r?.end ?? 0), b = Math.max(r?.start ?? 0, r?.end ?? 0);
+    if (b <= a) return null;
+    const v = this.code.value();
+    const end = v[b - 1] === "\n" && b - 1 > a ? b - 1 : b;
+    const line = (o) => v.slice(0, o).split("\n").length;
+    return { start: line(a), end: line(end) };
+  }
+
+  // The reference as the agent reads it. Claude Code takes `@path#L10-20` as a file reference
+  // with a line range; other agents (Codex, pi, ...) get `path:10-20` and read the file
+  // themselves. The path is relative to the agent's folder when the file is inside it.
+  referText(agent, cwd, lines) {
+    const abs = `${this.root}/${this.file}`;
+    const dir = (cwd ?? "").replace(/\/+$/, "");
+    const path = dir && inside(abs, dir) && abs !== dir ? abs.slice(dir.length + 1) : abs;
+    const span = !lines ? "" : lines.start === lines.end ? `${lines.start}` : `${lines.start}-${lines.end}`;
+    if (agent.app === "claude-code" || agent.program?.key === "claude") return `@${path}${span ? `#L${span}` : ""}`;
+    return span ? `${path}:${span}` : path;
+  }
+
+  // The button that adds a reference to the selected lines to the focused agent's input,
+  // without sending it. It floats beside where the mouse was let go after selecting. Herdr
+  // can't type into a terminal without Enter, so this pastes: the reference goes on the
+  // clipboard, the agent's pane takes focus, `terminal.paste` puts it in, and the clipboard
+  // gets its text back.
+  referButton(t) {
+    const pop = this.pop, lines = this.lines;
+    if (!pop || !lines) return null;
+    const target = this.referTarget();
+    if (!target) return null;
+    const name = target.agent.program?.name || target.agent.app || "agent";
+    const label = lines.start === lines.end ? `L${lines.start}` : `L${lines.start}-${lines.end}`;
+    // Below and right of the pointer; above it near the bottom, and kept inside the view.
+    const W = 190, H = 28;
+    const left = Math.max(6, Math.min(pop.x + 8, pop.width - W - 6));
+    const top = pop.y + 14 + H <= pop.height - 6 ? pop.y + 14 : Math.max(6, pop.y - H - 10);
+    // The theme's hover color is see-through: the outer layer keeps an opaque background,
+    // and only the inner one takes the hover color, so the code behind never shows through.
+    return div().id("files-refer").flex().absolute().left(left).top(top).h(H).max_w(W).rounded(7).cursor_pointer()
+      .bg(t.popover).border(1).border_color(t.border).shadow_md()
+      .tooltip(`Add ${this.referText(target.agent, target.cwd, lines)} to ${name}'s input`)
+      // The press stays here: the editor under it would start a new selection.
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_mouse_up("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => {
+        const now = this.referTarget();
+        const picked = this.selectedLines() ?? lines;
+        if (!now || !picked) return;
+        const text = ` ${this.referText(now.agent, now.cwd, picked)} `;
+        let before;
+        try { before = cx.read_from_clipboard(); } catch {}
+        cx.write_to_clipboard(text);
+        run("pane.focus", { pane: now.agent.pane });
+        run("terminal.paste");
+        this.pop = null;
+        cx.notify();
+        // Gives the paste time to read the clipboard, then puts its text back; the larger view
+        // closes then, so typing goes on in the agent.
+        cx.timer.after(400, cx => {
+          if (before !== undefined) { try { cx.write_to_clipboard(before); } catch {} }
+          if (this.view) closeOverlay(props()?.overlay);
+        });
+      })
+      .child(h_flex().id("files-refer-face").h_full().min_w(0).px(9).gap(5).items_center().rounded(6)
+        .text_size(12).text_color(t.foreground).hover(s => s.bg(t.hover))
+        .child(div().flex_none().font_medium().child(label))
+        .child(div().flex_none().text_color(t.dim).child("→"))
+        .child(div().min_w(0).truncate().text_color(t.muted).child(name)));
+  }
+
+  // The source view. Letting go of the mouse reads the selection and puts the reference
+  // button there; a new press or a scroll takes it away.
+  sourceView(t) {
+    if (!this.code) return div().p(12).text_color(t.dim).child(this.fileError || "Loading file…");
+    const hide = (_e, cx) => { if (this.pop) { this.pop = null; cx.notify(); } };
+    return div().id("files-source").relative().flex().flex_col().flex_1().min_h(0)
+      .on_mouse_down("left", hide)
+      .on_scroll_wheel(hide)
+      .on_mouse_up("left", (e, cx) => {
+        const lines = this.selectedLines();
+        const b = e.bounds;
+        const at = e.local_position ?? (b ? { x: e.position.x - b.x, y: e.position.y - b.y } : null);
+        this.lines = lines;
+        this.pop = lines && at && b ? { x: at.x, y: at.y, width: b.width, height: b.height } : null;
+        cx.notify();
+      })
+      .child(Editor.new(this.code).flex_1().min_h(0))
+      .when(Boolean(this.pop), el => { const b = this.referButton(t); return b ? el.child(b) : el; });
+  }
+
+  // The panel header's browser button for an HTML file. A local file opens where it is, so
+  // files next to it (CSS, scripts, images) load too. A file on another machine is copied
+  // here first, alone: what it links by relative path doesn't come with it.
+  browserButton(t) {
+    return div().id("files-browser").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
+      .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(this.on ? `Open a copy in the browser (from ${this.on}; files it links aren't copied)` : "Open in the browser")
+      .on_click((_e, cx) => {
+        const file = this.file, root = this.root, on = this.on;
+        if (!file || !root) return;
+        const abs = `${root}/${file}`;
+        if (!on) { this.openExternal(abs, cx); return; }
+        cx.spawn(async cx => {
+          try {
+            const text = await readTextFile(abs, { on });
+            if (text === null) throw new Error("This file is no longer available");
+            const copy = await this.writeCache(`page-${hash(`${on}\u0000${abs}\u0000${text}`)}.html`, text);
+            this.openExternal(`${appHome()}/${copy}`, cx);
+          } catch (e) {
+            notify({ title: "Cannot open in the browser", body: `${file}: ${String(e?.message ?? e)}`, level: "error" });
+          }
+        });
+      })
+      .child(svg("mods/clicker-files/external.svg").size(14).flex_none());
+  }
+
+  // The panel header's expand button: opens the shown file in the larger view.
+  expandButton(t) {
+    return div().id("files-expand").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
+      .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Open in a larger view")
+      .on_click((_e, cx) => {
+        if (!this.file || !this.root) return;
+        openOverlay({ mod: "clicker-files", kind: "dialog", width: 0.82, height: 0.86,
+          props: { view: { file: this.file, root: this.root, on: this.on ?? null } } });
+      })
+      .child(svg("mods/clicker-files/expand.svg").size(14).flex_none());
+  }
+
+  // Preview | Markdown (Source for a mermaid file), in the larger view's header. The choice holds for the next ones too.
   mdTabs(t, kind) {
     const tab = (mode, label) => div().id(`files-md-${mode}`).h(22).px(9).flex().items_center().rounded(5).cursor_pointer().text_size(12)
       .when(this.mdMode === mode, el => el.bg(t.raised).text_color(t.foreground).font_medium())
       .when(this.mdMode !== mode, el => el.text_color(t.muted).hover(s => s.text_color(t.foreground)))
       .on_click((_e, cx) => {
         this.mdMode = mode;
+        this.pop = null;
         try { localStorage.setItem("md-mode", mode); } catch {}
         cx.notify();
       })
@@ -665,7 +837,26 @@ export default class Files extends View {
       .content(this.menu(tg, t));
   }
 
+  // The larger view: the file's path, the Preview | Markdown tabs and a close button over
+  // the preview or the source. Links to other files open here too.
+  renderView(t) {
+    const kind = previewKind(this.file);
+    const sourceShown = !kind || this.mdMode !== "preview";
+    return v_flex().id("files-view").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(46).flex_none().pl(18).pr(10).gap(10).items_center().border_b(1).border_color(t.border)
+        .child(svg("mods/clicker-files/file.svg").size(14).flex_none().text_color(t.muted))
+        .child(div().flex_1().min_w(0).truncate().font_medium().child(this.file ?? ""))
+        .when(Boolean(kind), el => el.child(this.mdTabs(t, kind)))
+        .child(div().id("files-view-close").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
+          .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+          .tooltip("Close (Esc)")
+          .on_click(() => closeOverlay(props()?.overlay))
+          .child(svg("mods/clicker-files/close.svg").size(14).flex_none())))
+      .child(sourceShown ? this.sourceView(t) : this.preview(t, kind));
+  }
+
   render(cx) {
+    if (this.view) return this.renderView(theme());
     const tg = this.target();
     if (this.key(tg) !== this.context?.key) this.refresh(cx);
     this.publish(tg);
@@ -679,11 +870,13 @@ export default class Files extends View {
         .child(div().font_semibold().child("Files"))
         .when(Boolean(this.file) || !tg.repo, el => el.child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? base(this.root))))
         .when(!this.file && Boolean(tg.repo), el => el.child(div().flex_1()).child(this.select(tg, t)))
-        .when(md, el => el.child(this.mdTabs(t, kind))))
+        .when(md, el => el.child(this.expandButton(t)))
+        .when(HTML.test(this.file ?? ""), el => el.child(this.browserButton(t))))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading || waiting ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(md && this.mdMode === "preview", el => el.child(this.preview(t, kind)))
-      .when(Boolean(this.file) && !(md && this.mdMode === "preview"), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      // The panel always shows a markdown or mermaid file rendered; its source is in the larger view.
+      .when(md, el => el.child(this.preview(t, kind)))
+      .when(Boolean(this.file) && !md, el => el.child(this.sourceView(t)));
   }
 }

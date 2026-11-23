@@ -56,14 +56,32 @@ pointer can cross the gap. Spaces without agents get no card. Past 320 px the li
   moves to another worktree. The shown worktree is published as shared
   `clicker-files.worktree` (`{ space, on, root, picked }`).
 - *Preview.* Markdown (`.md`, `.markdown`, `.mdown`, `.mkd`, `.mkdn`, `.mdx`) and Mermaid
-  (`.mmd`, `.mermaid`) files open with **Preview | Markdown** (Source for Mermaid) at the
-  header's right end; the pick is remembered. The preview renders the Markdown, draws every
+  (`.mmd`, `.mermaid`) files always show rendered in the panel. An expand button at the
+  header's right end opens the file in a dialog (82% × 86% of the window; Esc or × closes
+  it) with **Preview | Markdown** (Source for Mermaid) tabs; the pick is remembered. The
+  preview renders the Markdown, draws every
   ```` ```mermaid ```` / `~~~mermaid` block (any indent, also inside lists) as a diagram,
   and shows lines holding only images (`![a](src)`, `[![a](src)](href)`, `<img>` in plain
   wrappers, with its `width`) as image rows. Web images are not fetched: a link chip
   opens them in the browser. Links to other files of the worktree open in the panel;
   `http(s)` and `mailto` links open outside. Diagram types it can't draw show why, then
   their source. The open file re-reads when it is saved (and every 10 s).
+- *Reference to an agent.* Selecting lines in a source view (a code file, or the larger
+  view's Markdown tab) and letting go of the mouse shows a floating button beside the pointer,
+  such as **L10-20 → Claude Code**, when the focused pane runs an agent on the file's machine.
+  A new press, a scroll, a tab switch or a reload of the file takes it away. Clicking it puts
+  a reference to those lines into that agent's input without sending it. Claude Code gets
+  `@path#L10-20`, which it reads as a file reference with a line range; other agents (Codex,
+  pi, …) get `path:10-20` and read the file themselves. The path is relative to the agent's
+  folder when the file is inside it. Herdr can't type into a terminal without Enter, so the
+  button pastes: the reference goes on the clipboard, the agent's pane takes focus,
+  `terminal.paste` puts it in, and after 400 ms the clipboard gets its text back (non-text
+  contents are not kept). The larger view closes after it.
+- *HTML.* `.html`, `.htm` and `.xhtml` files show their source, with a browser button at the
+  header's right end. A file on this computer opens where it is, so the CSS, scripts and
+  images it links load too. A file on another machine is copied into
+  `mods/clicker-files/.cache/` and the copy opens: files it links by relative path are not
+  copied, so a page that needs them shows without them.
 
 ## Built from
 
