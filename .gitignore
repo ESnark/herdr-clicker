@@ -1,6 +1,4 @@
 # Written by the Herdr app into every mod folder
 gpui-kit.d.ts
 jsconfig.json
-# Drawn diagrams and copied images
-.cache/
 .DS_Store

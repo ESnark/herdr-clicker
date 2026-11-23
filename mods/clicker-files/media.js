@@ -1,13 +1,6 @@
 // Small byte helpers for the preview's images: no `file`, `stat` or `base64` programs, so
 // nothing waits on a process.
 
-// FNV-1a over bytes, plus the length: a content name for a cache file.
-export function hashBytes(bytes) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193) >>> 0; }
-  return h.toString(36) + bytes.length.toString(36);
-}
-
 const B64 = new Int16Array(128).fill(-1);
 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".split("").forEach((c, i) => { B64[c.charCodeAt(0)] = i; });
 
@@ -28,8 +21,10 @@ const u16be = (b, i) => (b[i] << 8) | b[i + 1];
 const u16le = (b, i) => b[i] | (b[i + 1] << 8);
 const u32be = (b, i) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
 const u24le = (b, i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16);
+const u32le = (b, i) => (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) >>> 0;
+const i32le = (b, i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
 
-// { width, height } from an image's header (PNG, GIF, JPEG, WebP), or from an SVG's own
+// { width, height } from an image's header (PNG, GIF, JPEG, WebP, BMP, ICO, TIFF), or from an SVG's own
 // width/height (else its viewBox). Null when it can't tell.
 export function imageSize(bytes, ext) {
   const b = bytes;
@@ -48,6 +43,28 @@ export function imageSize(bytes, ext) {
     if (kind === "VP8X") return { width: u24le(b, 24) + 1, height: u24le(b, 27) + 1 };
     if (kind === "VP8 ") return { width: u16le(b, 26) & 0x3fff, height: u16le(b, 28) & 0x3fff };
     if (kind === "VP8L") { const v = b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24); return { width: (v & 0x3fff) + 1, height: ((v >> 14) & 0x3fff) + 1 }; }
+  }
+  if (b.length > 26 && b[0] === 0x42 && b[1] === 0x4d) { // BM: an old core header, else BITMAPINFOHEADER
+    if (u32le(b, 14) === 12) return { width: u16le(b, 18), height: u16le(b, 20) };
+    return { width: Math.abs(i32le(b, 18)), height: Math.abs(i32le(b, 22)) }; // negative: drawn top-down
+  }
+  if (b.length > 22 && b[0] === 0 && b[1] === 0 && b[2] === 1 && b[3] === 0) { // ICO: its biggest picture
+    let best = null;
+    for (let k = 0, count = u16le(b, 4); k < count && 22 + k * 16 <= b.length; k++) {
+      const width = b[6 + k * 16] || 256, height = b[7 + k * 16] || 256; // 0 means 256
+      if (!best || width * height > best.width * best.height) best = { width, height };
+    }
+    return best;
+  }
+  if (b.length > 8 && ((b[0] === 0x49 && b[1] === 0x49) || (b[0] === 0x4d && b[1] === 0x4d))) { // TIFF: the first IFD
+    const le = b[0] === 0x49, u16 = (i) => le ? u16le(b, i) : u16be(b, i), u32 = (i) => le ? u32le(b, i) : u32be(b, i);
+    const ifd = u32(4);
+    let width = null, height = null;
+    if (ifd + 2 <= b.length) for (let k = 0, count = u16(ifd); k < count && ifd + 14 + k * 12 <= b.length; k++) {
+      const e = ifd + 2 + k * 12, tag = u16(e), value = u16(e + 2) === 3 ? u16(e + 8) : u32(e + 8); // SHORT or LONG
+      if (tag === 256) width = value; else if (tag === 257) height = value;
+    }
+    return width && height ? { width, height } : null;
   }
   if (b[0] === 0xff && b[1] === 0xd8) { // JPEG: walk the segments to a start-of-frame
     let i = 2;

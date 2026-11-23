@@ -1,6 +1,6 @@
 // clicker-files: modified from Herdr's shipped `files` mod (herdrdev/herdr-app, Apache-2.0).
 // Changes: a worktree select, a preview that opens in a larger dialog with Preview/Markdown tabs,
-// mermaid diagrams and images in the preview.
+// mermaid diagrams and images in the preview, image files shown as pictures.
 //
 // A lazy file browser for the focused pane's worktree, with bounded read-only previews.
 //
@@ -14,13 +14,16 @@
 // button at the header's right opens the same file in a dialog (this mod again, with
 // `props().view`), which has the Preview | Markdown (Source) tabs. Mermaid diagrams (whole
 // files and ```mermaid blocks) are drawn by ./mermaid.js without a browser; images on lines
-// of their own are copied into .cache/ (the app draws images from its own folder only).
+// of their own are copied into mods/clicker-files-cache/ (the app draws images from its own
+// folder only).
+// Image files show as the picture, copied there the same way; the larger view shows it bigger
+// (and an SVG's source on a Source tab).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, Popover, TextView } from "gpui-base";
 import { spaces, panes, focused, agents, exec, readTextFile, watchFolder, theme, settings, window, home, appHome, checking, setShared, openOverlay, closeOverlay, props, notify, run } from "herdr";
 import * as fs from "fs/promises";
 import { splitMarkdown, hash } from "./blocks.js";
-import { hashBytes, fromBase64, imageSize } from "./media.js";
+import { fromBase64, imageSize } from "./media.js";
 
 // Where the focused pane is now: its live folder, its machine, its space and pane.
 function location() {
@@ -39,16 +42,27 @@ const MARKDOWN = /\.(md|markdown|mdown|mkd|mkdn|mdx)$/i;
 const MERMAID = /\.(mmd|mermaid)$/i;
 // HTML files show their source; a header button opens them in the system's browser.
 const HTML = /\.(html?|xhtml)$/i;
+// Image files the app can draw show as the picture; in the larger view SVG also has a Source tab.
+const IMAGE = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?)$/i;
+const SVG = /\.svg$/i;
 // Rendering is slower than showing source: a very long file previews its first part.
 const PREVIEW_LIMIT = 200000;
-// Drawn diagrams and copied images, by content: hidden, so writing them doesn't reload the mod.
-const CACHE = "mods/clicker-files/.cache";
-// An image on another machine comes over as base64 in a command argument: keep it small.
+// Drawn diagrams (named by content) and copied images (named by where they are: a new version
+// replaces the old file). A folder of its own under mods/: the app keeps a picture it loaded by
+// its path, and reads it again when it is saved under mods/, but not in a hidden folder or
+// outside mods/; saving into this mod's own folder would reload the mod.
+const CACHE = "mods/clicker-files-cache";
+// An image on another machine comes over as base64 in a command's output, decoded in this
+// slow JS: keep it small. A local one is read in-process.
 const REMOTE_IMAGE_LIMIT = 512 * 1024;
+const LOCAL_IMAGE_LIMIT = 50 * 1024 * 1024;
 // A diagram wider than the preview shrinks to fit down to this scale; below it, it scrolls.
 const MIN_SCALE = 0.75;
-// What a file previews as: "md", "mermaid", or null (source only).
-const previewKind = (file) => !file ? null : MARKDOWN.test(file) ? "md" : MERMAID.test(file) ? "mermaid" : null;
+// What a file previews as: "md", "mermaid", "svg", "image" (no source), or null (source only).
+const previewKind = (file) => !file ? null : MARKDOWN.test(file) ? "md" : MERMAID.test(file) ? "mermaid"
+  : SVG.test(file) ? "svg" : IMAGE.test(file) ? "image" : null;
+// 245 KB, 1.2 MB.
+const fileSize = (n) => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 // A drawing's name: its source and the colors and fonts it was drawn with.
 const diagramKey = (source, c) => hash(`${source}\u0000${c.bg}\u0000${c.fg}\u0000${c.ui}\u0000${c.mono}`);
 
@@ -119,7 +133,9 @@ export default class Files extends View {
     // The markdown tab last chosen, kept across restarts; Preview by default.
     try { this.mdMode = localStorage.getItem("md-mode") === "markdown" ? "markdown" : "preview"; } catch { this.mdMode = "preview"; }
     this.diagrams = new Map(); // hash of source and colors -> { state: "ok" | "error", path, width, height, error }
-    this.pictures = new Map(); // spot(on, image path) -> { state: "ok" | "error", path, width, height, error }
+    // spot(on, image path) -> { state: "ok" | "error", path, width, height, bytes, ext, error, stale }:
+    // markdown images and the open image file. A stale one still shows until it is copied again.
+    this.pictures = new Map();
     this.previewWidth = 0; // the preview's width, for fitting diagrams and images
     this.redrawUntil = 0; // see image()
     // Redraws for a moment after a new image is first drawn (see image()). A timer set up here
@@ -132,15 +148,12 @@ export default class Files extends View {
       this.root = view.root; this.on = view.on ?? null;
       this.context = { key: "view", cwd: view.root, on: this.on };
       this.show(view.file, cx);
-      // Follows saves, as the panel does.
-      cx.timer.every(10000, cx => {
-        if (!this.file) return;
-        const context = this.context;
-        cx.spawn(async cx => { try { await this.readFile(this.file, context, cx); } catch {} finally { cx.notify(); } });
-      });
+      // Follows saves, as the panel does: the folder watch (on this computer) and every 10 s.
+      this.watch(view.root, cx);
+      cx.timer.every(10000, cx => this.reread(cx));
       return;
     }
-    // Cache files made over a month ago go; one still shown is made again when next needed.
+    // Cache files not written for a month go; one still needed is written again.
     if (!checking()) exec("find", [`${appHome()}/${CACHE}`, "-type", "f", "-mtime", "+30", "-delete"]).catch(() => {});
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
@@ -222,9 +235,26 @@ export default class Files extends View {
     this.watched = root;
     const context = this.context;
     cx.spawn(async cx => {
-      try { while (this.context === context) { await watchFolder(root); if (this.current(context)) this.refresh(cx); } }
+      try {
+        while (this.context === context) {
+          const changed = await watchFolder(root);
+          if (!this.current(context)) continue;
+          // Images from a changed path are copied again (not on every refresh: they aren't read
+          // again otherwise). A returned root path means everything under it.
+          const hit = (abs) => (changed ?? []).some(p => p === abs || inside(abs, p));
+          if (this.staleWhere((on, abs) => !on && hit(abs))) this.wantMedia = true;
+          if (this.view) this.reread(cx); else this.refresh(cx);
+        }
+      }
       catch { if (this.context === context) this.watched = null; }
     });
+  }
+
+  // The larger view reads its one file again; the panel refreshes instead.
+  reread(cx) {
+    if (!this.file) return;
+    const context = this.context;
+    cx.spawn(async cx => { try { await this.readFile(this.file, context, cx); } catch {} finally { cx.notify(); } });
   }
 
   current(context) {
@@ -305,8 +335,10 @@ export default class Files extends View {
 
   show(path, cx) {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null; this.text = null; this.lines = null; this.pop = null;
-    // Opening a file looks at its images again (they're cached by content, so this is cheap).
-    if (path) this.pictures.clear();
+    this.imageActual = false;
+    // Opening a file reads its images again: a change the watch missed, or one on another
+    // machine (no watch there). The old picture shows until the new copy is written.
+    if (path) this.staleWhere(() => true);
     if (!path || !cx) return;
     const context = this.context;
     cx.spawn(async cx => {
@@ -320,6 +352,8 @@ export default class Files extends View {
   // changed. Then makes what its preview draws (diagrams, images). That work runs here, never
   // while drawing: async work started during a render didn't come back in this runtime.
   async readFile(path, context, cx) {
+    const kind = previewKind(path);
+    if (kind === "image") return this.readImage(path, context, cx);
     const text = await readTextFile(`${context.cwd}/${path}`, { on: context.on });
     if (this.file !== path || !this.current(context)) return;
     if (text === null) { this.fileError = "This file is no longer available"; return; }
@@ -334,8 +368,45 @@ export default class Files extends View {
         font_family: settings().font_family, font_size: 12,
         syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
       cx?.notify(); // the text shows now; drawings follow
+      if (kind === "svg") this.staleWhere((on, abs) => on === (context.on ?? null) && abs === `${context.cwd}/${path}`);
     } else if (!this.wantMedia) return;
+    if (kind === "svg") return this.readImage(path, context, cx);
     await this.prepareMedia(path, context, cx);
+  }
+
+  // The open image file, copied into the cache: when it opens, and again when it changed
+  // (the folder watch says so; an SVG's text changed).
+  async readImage(path, context, cx) {
+    const abs = `${context.cwd}/${path}`, key = spot(context.on, abs);
+    if (!this.need(key) || this.imageLoading === key) return;
+    this.imageLoading = key;
+    try { await this.copyPicture(key, abs, context.on); }
+    finally { if (this.imageLoading === key) this.imageLoading = null; }
+    if (this.file === path && this.current(context)) cx?.notify();
+  }
+
+  // An image that has no copy yet, or a stale one.
+  need(key) {
+    const p = this.pictures.get(key);
+    return !p || Boolean(p.stale);
+  }
+
+  // Marks the images whose (machine, path) pass `test` to be copied again. True if any did.
+  staleWhere(test) {
+    let any = false;
+    for (const [key, p] of this.pictures) {
+      const [on, abs] = JSON.parse(key);
+      if (!p.stale && test(on, abs)) { p.stale = true; any = true; }
+    }
+    return any;
+  }
+
+  // Copies one image into the cache and records it, or why it couldn't be.
+  async copyPicture(key, abs, on) {
+    let p;
+    try { p = { state: "ok", ...(await this.copyImage(abs, on)) }; }
+    catch (e) { p = { state: "error", error: String(e?.message ?? e) }; }
+    this.pictures.set(key, p);
   }
 
   // Makes every diagram and image the open file's preview shows, one after another, then
@@ -398,14 +469,11 @@ export default class Files extends View {
     return { abs, key: spot(this.on, abs) };
   }
 
-  // Copies one image into the cache. True when it made something new.
+  // Copies one markdown image into the cache. True when it copied it.
   async loadPicture(it) {
     const where = this.pictureSource(it);
-    if (!where || this.pictures.has(where.key)) return false;
-    let p;
-    try { p = { state: "ok", ...(await this.copyImage(where.abs, this.on)) }; }
-    catch (e) { p = { state: "error", error: String(e?.message ?? e) }; }
-    this.pictures.set(where.key, p);
+    if (!where || !this.need(where.key)) return false;
+    await this.copyPicture(where.key, where.abs, this.on);
     return true;
   }
 
@@ -556,7 +624,7 @@ export default class Files extends View {
       .child(svg("mods/clicker-files/expand.svg").size(14).flex_none());
   }
 
-  // Preview | Markdown (Source for a mermaid file), in the larger view's header. The choice holds for the next ones too.
+  // Preview | Markdown (Source for mermaid and SVG files), in the larger view's header. The choice holds for the next ones too.
   mdTabs(t, kind) {
     const tab = (mode, label) => div().id(`files-md-${mode}`).h(22).px(9).flex().items_center().rounded(5).cursor_pointer().text_size(12)
       .when(this.mdMode === mode, el => el.bg(t.raised).text_color(t.foreground).font_medium())
@@ -570,7 +638,7 @@ export default class Files extends View {
       .child(label);
     return h_flex().flex_none().p(2).gap(2).rounded(7).bg(t.surface).border(1).border_color(t.border)
       .child(tab("preview", "Preview"))
-      .child(tab("markdown", kind === "mermaid" ? "Source" : "Markdown"));
+      .child(tab("markdown", kind === "md" ? "Markdown" : "Source"));
   }
 
   // The rendered file: markdown chunks, diagrams and images in order. Each file keeps its
@@ -612,12 +680,15 @@ export default class Files extends View {
     return (this.cacheReady ??= this.io(() => fs.mkdir(`${appHome()}/${CACHE}`, { recursive: true })).catch(e => { this.cacheReady = null; throw e; }));
   }
 
-  // Writes a file into the cache, once: a name is a hash of what it holds.
-  async writeCache(name, contents) {
+  // Writes a file into the cache. A diagram's name is a hash of what it holds, so it is written
+  // once; an image's is where it came from, so it is written over (`replace`).
+  async writeCache(name, contents, replace = false) {
     await this.ensureCache();
-    const path = `${appHome()}/${CACHE}/${name}`;
-    if (!(await this.io(() => fs.exists(path)))) await this.io(() => fs.writeFile(path, contents));
-    return `${CACHE}/${name}`;
+    const path = `${appHome()}/${CACHE}/${name}`, rel = `${CACHE}/${name}`;
+    if (replace || !(await this.io(() => fs.exists(path)))) await this.io(() => fs.writeFile(path, contents));
+    // A picture already drawn is read again by the app once it sees the save: draw for a while.
+    if (replace && this.drawn?.has(rel)) this.redrawUntil = Math.max(this.redrawUntil, Date.now() + 4000);
+    return rel;
   }
 
   // A mermaid block: the drawing once it's made, else a note; on failure the reason and its source.
@@ -680,7 +751,36 @@ export default class Files extends View {
     return it.href ? div().id(`files-img-${id}`).cursor_pointer().on_click((_e, cx) => this.follow(it.href, cx)).child(pic) : pic;
   }
 
-  // Copies an image into the cache under a name from its bytes, and reads its size from them.
+  // An image file: fitted to the panel, never enlarged. When it doesn't fit, a click shows it
+  // at its own size (scrolling) and another fits it again. Its size and format below.
+  imageView(t) {
+    const p = this.pictures.get(spot(this.on, `${this.root}/${this.file}`));
+    const note = (text, color) => div().p(12).text_size(12).text_color(color ?? t.dim).child(text);
+    if (!p) return note(this.fileError || "Loading image…");
+    if (p.state === "error") return note(`Image not shown: ${p.error}`, t.blocked);
+    const room = this.imageRoom ?? { w: Math.max(120, (this.previewWidth || 420) - 32), h: 320 };
+    // No size in its header (an SVG without width, height or viewBox): a square.
+    const w = p.width || Math.min(room.w, room.h), h = p.height || w;
+    const fit = Math.min(1, room.w / w, room.h / h);
+    const actual = this.imageActual && fit < 1;
+    const scale = actual ? 1 : fit;
+    const info = [p.width && p.height ? `${p.width} × ${p.height}` : null, p.ext.toUpperCase(), fileSize(p.bytes),
+      fit < 1 ? (actual ? "100% · click to fit" : `${Math.round(fit * 100)}% · click for 100%`) : null].filter(Boolean).join(" · ");
+    return v_flex().flex_1().min_h(0)
+      .child(div().id(`files-image-${this.file}`).flex_1().min_h(0).p(16).overflow_scrollbar()
+        .when(!actual, el => el.flex().items_center().justify_center())
+        .on_size_change((size, cx) => {
+          const next = { w: Math.max(40, Math.floor(size.width) - 32), h: Math.max(40, Math.floor(size.height) - 32) };
+          if (next.w !== this.imageRoom?.w || next.h !== this.imageRoom?.h) { this.imageRoom = next; cx.notify(); }
+        })
+        .child(div().id("files-image-pic").flex_none()
+          .when(fit < 1, el => el.cursor_pointer().on_click((_e, cx) => { this.imageActual = !this.imageActual; cx.notify(); }))
+          .child(this.image(p.path).w(w * scale).h(h * scale))))
+      .child(div().h(28).flex_none().px(14).flex().items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim).truncate().child(info));
+  }
+
+  // Copies an image into the cache under a name from where it is (machine and path), and
+  // reads its size from its header. No hash of its bytes: this runtime's JS is too slow for that.
   // Local files are read in-process (under home); elsewhere, and from another machine, they
   // come over as base64 through a program, so only small ones.
   async copyImage(abs, on) {
@@ -688,6 +788,7 @@ export default class Files extends View {
     let bytes = null;
     // Outside home, fs refuses (it may throw at once rather than reject): fall back below.
     if (!on) { try { bytes = await this.io(() => fs.readFile(abs)); } catch { bytes = null; } }
+    if (bytes && bytes.length > LOCAL_IMAGE_LIMIT) throw new Error(`over ${LOCAL_IMAGE_LIMIT / 1024 / 1024} MB`);
     if (!bytes) {
       const r = await exec("sh", ["-c", `[ -f "$1" ] || exit 3; [ "$(wc -c < "$1")" -le ${REMOTE_IMAGE_LIMIT} ] || exit 5; base64 < "$1"`, "sh", abs], { on });
       if (r.code === 3) throw new Error("not found");
@@ -696,8 +797,8 @@ export default class Files extends View {
       bytes = fromBase64(r.stdout);
     }
     const size = imageSize(bytes, ext);
-    const path = await this.writeCache(`img-${hashBytes(bytes)}.${ext}`, bytes);
-    return { path, width: size?.width ?? null, height: size?.height ?? null };
+    const path = await this.writeCache(`img-${hash(spot(on, abs))}.${ext}`, bytes, true);
+    return { path, width: size?.width ?? null, height: size?.height ?? null, bytes: bytes.length, ext };
   }
 
   // A link in a preview: another file of this worktree opens here; web and mail links open
@@ -841,18 +942,25 @@ export default class Files extends View {
   // the preview or the source. Links to other files open here too.
   renderView(t) {
     const kind = previewKind(this.file);
-    const sourceShown = !kind || this.mdMode !== "preview";
+    // Markdown, mermaid and SVG have Preview | Markdown (Source) tabs; other images only the picture.
+    const tabs = Boolean(kind) && kind !== "image";
+    const sourceShown = !kind || (tabs && this.mdMode !== "preview");
     return v_flex().id("files-view").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(46).flex_none().pl(18).pr(10).gap(10).items_center().border_b(1).border_color(t.border)
         .child(svg("mods/clicker-files/file.svg").size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().font_medium().child(this.file ?? ""))
-        .when(Boolean(kind), el => el.child(this.mdTabs(t, kind)))
+        .when(tabs, el => el.child(this.mdTabs(t, kind)))
         .child(div().id("files-view-close").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
           .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
           .tooltip("Close (Esc)")
           .on_click(() => closeOverlay(props()?.overlay))
           .child(svg("mods/clicker-files/close.svg").size(14).flex_none())))
-      .child(sourceShown ? this.sourceView(t) : this.preview(t, kind));
+      .child(sourceShown ? this.sourceView(t) : this.rendered(t, kind));
+  }
+
+  // A file shown rendered: the picture of an image (or SVG), else the markdown or mermaid preview.
+  rendered(t, kind) {
+    return kind === "image" || kind === "svg" ? this.imageView(t) : this.preview(t, kind);
   }
 
   render(cx) {
@@ -863,20 +971,19 @@ export default class Files extends View {
     const t = theme();
     const waiting = tg.cwd && tg.root === undefined;
     const kind = previewKind(this.file);
-    const md = Boolean(kind);
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
         .when(Boolean(this.file) || !tg.repo, el => el.child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? base(this.root))))
         .when(!this.file && Boolean(tg.repo), el => el.child(div().flex_1()).child(this.select(tg, t)))
-        .when(md, el => el.child(this.expandButton(t)))
+        .when(Boolean(kind), el => el.child(this.expandButton(t)))
         .when(HTML.test(this.file ?? ""), el => el.child(this.browserButton(t))))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading || waiting ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      // The panel always shows a markdown or mermaid file rendered; its source is in the larger view.
-      .when(md, el => el.child(this.preview(t, kind)))
-      .when(Boolean(this.file) && !md, el => el.child(this.sourceView(t)));
+      // The panel always shows a markdown, mermaid or image file rendered; its source is in the larger view.
+      .when(Boolean(kind), el => el.child(this.rendered(t, kind)))
+      .when(Boolean(this.file) && !kind, el => el.child(this.sourceView(t)));
   }
 }

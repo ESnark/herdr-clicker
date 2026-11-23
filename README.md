@@ -5,8 +5,8 @@ default window:
 
 - **Agents** list shows only the selected workspace's agents by default.
 - Resting the pointer on a **space** shows a card of its agents; click one to go to it.
-- **Files** panel picks git worktrees (and follows the focused pane into them), and
-  previews Markdown and Mermaid files with diagrams and images.
+- **Files** panel picks git worktrees (and follows the focused pane into them), previews
+  Markdown and Mermaid files with diagrams and images, and shows image files.
 
 See [RECIPE.md](RECIPE.md) for what it looks like, how it behaves and how it is built.
 
@@ -20,7 +20,9 @@ cp -R mods/clicker-agents mods/clicker-spaces mods/clicker-files ~/.config/herdr
 herdr-app do layout.switch '{"name":"clicker"}'
 ```
 
-`ctrl-shift-l` switches back to your previous layout; deleting the files removes it.
+`ctrl-shift-l` switches back to your previous layout. To remove it, delete those files and
+`~/.config/herdr-app/mods/clicker-files-cache/`, where the Files panel keeps drawn diagrams
+and copied images.
 
 The mods run `git` (worktrees, status), `sh`, `find` (cache cleanup) and `base64`
 (images on another machine). Opening a Markdown file never reaches the network: web

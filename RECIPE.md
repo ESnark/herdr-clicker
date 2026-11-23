@@ -4,7 +4,8 @@ Herdr's default window, tuned for working one workspace at a time. The Agents li
 only the selected space's agents by default. Resting the pointer on a space shows a card of
 that space's agents beside it, so another space's agent is one click away. The Files panel
 follows the focused pane into whatever git worktree it is in, lets you pick any worktree of
-that repo, and previews Markdown and Mermaid files, diagrams and images included.
+that repo, and previews Markdown and Mermaid files, diagrams and images included, and image
+files.
 
 ## What you see
 
@@ -66,6 +67,13 @@ pointer can cross the gap. Spaces without agents get no card. Past 320 px the li
   opens them in the browser. Links to other files of the worktree open in the panel;
   `http(s)` and `mailto` links open outside. Diagram types it can't draw show why, then
   their source. The open file re-reads when it is saved (and every 10 s).
+- *Image files.* PNG, JPEG, GIF, WebP, BMP, ICO and TIFF show as the picture, and so does
+  SVG; the expand button opens them in the larger view too, where an SVG also has
+  **Preview | Source** tabs. The picture is centered and fitted to the panel (or the view),
+  never enlarged; when it doesn't fit, a click shows it at its own size (scrolling) and
+  another click fits it again. A bar below gives its size in pixels, format, file size and
+  scale. A local image shows its new version a moment after it is saved; on another
+  machine, open it again.
 - *Reference to an agent.* Selecting lines in a source view (a code file, or the larger
   view's Markdown tab) and letting go of the mouse shows a floating button beside the pointer,
   such as **L10-20 → Claude Code**, when the focused pane runs an agent on the file's machine.
@@ -80,7 +88,7 @@ pointer can cross the gap. Spaces without agents get no card. Past 320 px the li
 - *HTML.* `.html`, `.htm` and `.xhtml` files show their source, with a browser button at the
   header's right end. A file on this computer opens where it is, so the CSS, scripts and
   images it links load too. A file on another machine is copied into
-  `mods/clicker-files/.cache/` and the copy opens: files it links by relative path are not
+  `mods/clicker-files-cache/` and the copy opens: files it links by relative path are not
   copied, so a page that needs them shows without them.
 
 ## Built from
@@ -102,14 +110,17 @@ pointer can cross the gap. Spaces without agents get no card. Past 320 px the li
   (the space card), `Popover` (the worktree select), `TextView` (Markdown), `Editor`
   (source). `fs/promises` for the cache.
 - Programs: `git` (`rev-parse`, `worktree list --porcelain -z`, `status`), `sh` (folder
-  listing, as shipped), `find` (removes cache files older than 30 days), `base64` (images on
+  listing, as shipped), `find` (when the panel starts, removes cache files not written for
+  30 days), `base64` (images on
   another machine, up to 512 KB), `open` / `xdg-open` (`mailto` links).
 - Diagrams: `mods/clicker-files/vendor/beautiful-mermaid.js`, beautiful-mermaid 1.1.3 with
   elkjs and entities bundled into one ES module by bun and patched for the mod runtime
   (the patches are listed at its top). `mermaid.js` loads it on the first diagram (about a
   second), renders SVG with the theme's background and foreground, and turns its CSS
   variables and `color-mix()` into plain colors. Drawings and copied images go to
-  `mods/clicker-files/.cache/`, named by content.
+  `mods/clicker-files-cache/`, a folder of its own made on first use. A drawing is named by
+  its source and colors; an image by its machine and path, so a new version is written over
+  the old copy. `media.js` reads image sizes from their headers.
 
 ## Watch out
 
@@ -120,6 +131,12 @@ pointer can cross the gap. Spaces without agents get no card. Past 320 px the li
 - Async work started while drawing (`cx.spawn` in `render`, then `fs`, `exec`, a sleep or
   an import) never came back here. Diagrams and images are made by the task that reads the
   open file; drawing only reads what it made and flags what is missing for the next read.
+- `image()` keeps a picture it loaded by its path, for the whole app. Saving over that file
+  makes the app read it again only under `mods/`, and not in a hidden folder there; saving
+  into the showing mod's own folder reloads that mod (its state is lost). So the cache is a
+  separate, non-hidden folder under `mods/`.
+- The mod runtime's JS is slow (a loop over bytes took 0.45 s per MB), so images are not
+  named by a hash of their bytes.
 - `image()` loads only files under the app folder (so images are copied into the cache),
   loads them lazily on first draw, and doesn't redraw the panel when ready: the first time
   a path is drawn, a timer set up in `init` redraws for 2 s.
@@ -131,4 +148,4 @@ pointer can cross the gap. Spaces without agents get no card. Past 320 px the li
 - Limits: diagram types are flowchart, state, sequence, class, ER and xychart (no pie,
   gantt, …); an image inside a line of text is not shown; a diagram inside a list splits
   the list in two; the preview renders the first 200,000 characters; another machine's
-  images over 512 KB are not shown.
+  images over 512 KB are not shown, nor local ones over 50 MB; HEIC and AVIF are not drawn.
