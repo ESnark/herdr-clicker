@@ -70,7 +70,8 @@ one working. Agents you have already looked at get none. The most urgent come fi
   wrappers, with its `width`) as image rows. Web images are not fetched: a link chip
   opens them in the browser. Links to other files of the worktree open in the panel;
   `http(s)` and `mailto` links open outside. Diagram types it can't draw show why, then
-  their source. The open file re-reads when it is saved (and every 10 s while the window is in front).
+  their source. If the renderer didn't load or a drawing couldn't be saved, the next read tries
+  again. The panel remembers its last 500 drawings and images; older ones are made again. The open file re-reads when it is saved (and every 10 s while the window is in front).
 - *Image files.* PNG, JPEG, GIF, WebP, BMP, ICO and TIFF show as the picture, and so does
   SVG; the expand button opens them in the larger view too, where an SVG also has
   **Preview | Source** tabs. The picture is centered and fitted to the panel (or the view),
@@ -85,7 +86,8 @@ one working. Agents you have already looked at get none. The most urgent come fi
   a reference to those lines into that agent's input without sending it. Claude Code gets
   `@path#L10-20`, which it reads as a file reference with a line range; other agents (Codex,
   pi, …) get `path:10-20` and read the file themselves. The path is relative to the agent's
-  folder when the file is inside it. Herdr can't type into a terminal without Enter, so the
+  folder when the file is inside it. A path with a space is quoted: `@"my dir/a.md#L10-20"` for
+  Claude Code, `"my dir/a.md":10-20` for the others. Herdr can't type into a terminal without Enter, so the
   button pastes: the reference goes on the clipboard, the agent's pane takes focus,
   `terminal.paste` puts it in, and after 400 ms the clipboard gets its text back (non-text
   contents are not kept). The larger view closes after it.

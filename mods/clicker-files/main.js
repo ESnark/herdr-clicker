@@ -100,6 +100,16 @@ const CACHE = "mods/clicker-files-cache";
 // slow JS: keep it small. A local one is read in-process.
 const REMOTE_IMAGE_LIMIT = 512 * 1024;
 const LOCAL_IMAGE_LIMIT = 50 * 1024 * 1024;
+// How many drawn diagrams and copied images the panel remembers. Every edit of a diagram
+// makes a new one, so an agent rewriting a document would grow the list without end; past
+// this the oldest are forgotten (made again if they show again).
+const MEDIA_KEEP = 500;
+// Records `value` under `key` as the newest entry, forgetting the oldest past MEDIA_KEEP.
+function remember(map, key, value) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > MEDIA_KEEP) map.delete(map.keys().next().value);
+}
 // A diagram wider than the preview shrinks to fit down to this scale; below it, it scrolls.
 const MIN_SCALE = 0.75;
 // What a file previews as: "md", "mermaid", "svg", "image" (no source), or null (source only).
@@ -509,7 +519,7 @@ export default class Files extends View {
     let p;
     try { p = { state: "ok", ...(await this.copyImage(abs, on)) }; }
     catch (e) { p = { state: "error", error: String(e?.message ?? e) }; }
-    this.pictures.set(key, p);
+    remember(this.pictures, key, p);
   }
 
   // Makes every diagram and image the open file's preview shows, one after another, then
@@ -550,16 +560,22 @@ export default class Files extends View {
   }
 
   // Draws one mermaid source into the cache. True when it made something new.
+  // A source the renderer refuses (an unknown type, a syntax error) fails the same way every
+  // time, so that is kept. A renderer that didn't load, or a cache file that wasn't written,
+  // is tried again (`retry`) on the next read of the file.
   async drawDiagram(source, colors) {
     const key = diagramKey(source, colors);
-    if (this.diagrams.has(key)) return false;
-    let d;
+    const old = this.diagrams.get(key);
+    if (old && !old.retry) return false;
+    const reason = (e) => String(e?.message ?? e);
+    let d, r;
     try {
       const m = await this.mermaid();
-      const r = m.renderDiagram(source, colors);
-      d = { state: "ok", path: await this.writeCache(`mermaid-${key}.svg`, r.svg), width: r.width, height: r.height };
-    } catch (e) { d = { state: "error", error: String(e?.message ?? e) }; }
-    this.diagrams.set(key, d);
+      try { r = m.renderDiagram(source, colors); }
+      catch (e) { d = { state: "error", error: reason(e) }; }
+      if (r) d = { state: "ok", path: await this.writeCache(`mermaid-${key}.svg`, r.svg), width: r.width, height: r.height };
+    } catch (e) { d = { state: "error", retry: true, error: reason(e) }; }
+    remember(this.diagrams, key, d);
     return true;
   }
 
@@ -609,13 +625,22 @@ export default class Files extends View {
   // The reference as the agent reads it. Claude Code takes `@path#L10-20` as a file reference
   // with a line range; other agents (Codex, pi, ...) get `path:10-20` and read the file
   // themselves. The path is relative to the agent's folder when the file is inside it.
+  // A path with a space is quoted, or it would end at the space. Claude Code reads
+  // `@"a b/c.md#L10-20"`: it takes the quoted text whole, then finds the range in it, so the
+  // range goes inside the quotes.
+  // Others get `"a b/c.md":10-20`. A path holding a `"` can't be quoted and stays as it is.
   referText(agent, cwd, lines) {
     const abs = `${this.root}/${this.file}`;
     const dir = (cwd ?? "").replace(/\/+$/, "");
     const path = dir && inside(abs, dir) && abs !== dir ? abs.slice(dir.length + 1) : abs;
     const span = !lines ? "" : lines.start === lines.end ? `${lines.start}` : `${lines.start}-${lines.end}`;
-    if (agent.app === "claude-code" || agent.program?.key === "claude") return `@${path}${span ? `#L${span}` : ""}`;
-    return span ? `${path}:${span}` : path;
+    const quote = /\s/.test(path) && !path.includes('"');
+    if (agent.app === "claude-code" || agent.program?.key === "claude") {
+      const ref = `${path}${span ? `#L${span}` : ""}`;
+      return quote ? `@"${ref}"` : `@${ref}`;
+    }
+    const shown = quote ? `"${path}"` : path;
+    return span ? `${shown}:${span}` : shown;
   }
 
   // The button that adds a reference to the selected lines to the focused agent's input,
@@ -765,9 +790,9 @@ export default class Files extends View {
     return Math.max(120, (this.previewWidth || 420) - 36);
   }
 
-  // The mermaid helper, loaded on first use.
+  // The mermaid helper, loaded on first use. A load that failed is tried again next time.
   mermaid() {
-    return (this.mermaidModule ??= import("./mermaid.js"));
+    return (this.mermaidModule ??= import("./mermaid.js").catch(e => { this.mermaidModule = null; throw e; }));
   }
 
   // One fs call at a time. Calls left waiting together never finished (a preview with two
@@ -803,6 +828,8 @@ export default class Files extends View {
       this.wantMedia = true;
       return div().py(10).text_size(12).text_color(t.dim).child(this.mermaidModule ? "Drawing diagram…" : "Loading the diagram renderer…");
     }
+    // A failure worth another try asks for one, as a missing drawing does.
+    if (d.retry) this.wantMedia = true;
     if (d.state === "error") return v_flex().gap(4)
       .child(div().text_size(12).text_color(t.blocked).child(`Mermaid diagram not drawn: ${d.error}`))
       .child(TextView.markdown(`files-mmd-src-${key}-${i}`, "```\n" + source.replace(/```/g, "ˋˋˋ") + "\n```").selectable(true));
@@ -817,6 +844,8 @@ export default class Files extends View {
   // path is drawn, the panel draws again for the next 2 s (the timer set up in init).
   image(path) {
     if (!this.drawn?.has(path)) {
+      // Forgetting old paths costs only an extra 2 s of redraws if one is drawn again.
+      if (this.drawn?.size >= MEDIA_KEEP) this.drawn.clear();
       (this.drawn ??= new Set()).add(path);
       this.redrawUntil = Math.max(this.redrawUntil, Date.now() + 2000);
     }
