@@ -70,7 +70,7 @@ one working. Agents you have already looked at get none. The most urgent come fi
   wrappers, with its `width`) as image rows. Web images are not fetched: a link chip
   opens them in the browser. Links to other files of the worktree open in the panel;
   `http(s)` and `mailto` links open outside. Diagram types it can't draw show why, then
-  their source. The open file re-reads when it is saved (and every 10 s).
+  their source. The open file re-reads when it is saved (and every 10 s while the window is in front).
 - *Image files.* PNG, JPEG, GIF, WebP, BMP, ICO and TIFF show as the picture, and so does
   SVG; the expand button opens them in the larger view too, where an SVG also has
   **Preview | Source** tabs. The picture is centered and fitted to the panel (or the view),
@@ -104,7 +104,9 @@ one working. Agents you have already looked at get none. The most urgent come fi
   [`files`, `changes`]]], `status`]. Node ids are the shipped `main` layout's, which the
   shipped mods look up (`sidebar`, `panel`, `panel-body`).
 - `clicker-agents`, `clicker-spaces`, `clicker-files`: copies of the shipped `agents`,
-  `spaces`, `files` mods with the changes above (each says so at its top). Shipped mods
+  `spaces`, `files` mods of Herdr 0.1.18 with the changes above (each says so at its top).
+  Everything else follows the shipped mods: when Herdr updates them, carry their changes
+  over (`cloned_from` says which version they match). Shipped mods
   used as they are: `workspace-chrome` (also for icons), `tabs`, `pane`, `changes`,
   `workspace-status`.
 - `herdr`: `agents`, `spaces`, `panes`, `focused`, `terminals`, `theme`, `settings`,
@@ -113,7 +115,9 @@ one working. Agents you have already looked at get none. The most urgent come fi
   `openOverlay`/`closeOverlay`, `appHome`, `home`, `checking`. `gpui-base`: `HoverCard`
   (the space card), `Popover` (the worktree select), `TextView` (Markdown), `Editor`
   (source). `fs/promises` for the cache.
-- Programs: `git` (`rev-parse`, `worktree list --porcelain -z`, `status`), `sh` (folder
+- Programs: `git` (`rev-parse`, `worktree list --porcelain -z`, `status`: one scan per repo,
+  shared with the Changes panel as in the shipped `files` mod; it waits longer after a slow
+  scan and stops while the window isn't in front), `sh` (folder
   listing, as shipped), `find` (when the panel starts, removes cache files not written for
   30 days), `base64` (images on
   another machine, up to 512 KB), `open` / `xdg-open` (`mailto` links).

@@ -25,6 +25,50 @@ import * as fs from "fs/promises";
 import { splitMarkdown, hash } from "./blocks.js";
 import { fromBase64, imageSize } from "./media.js";
 
+// The panels share data in one VM, but their host tasks belong to separate copies.
+const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
+
+async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, cx, current) {
+  const repo = JSON.stringify([on, root]), now = Date.now();
+  for (const [key, scan] of scans) {
+    if (scan.pollAt <= now || (!scan.pollAt && scan.task.is_done())) scans.delete(key);
+  }
+  while (current()) {
+    let scan = scans.get(repo);
+    const pending = scan && !scan.pollAt && !scan.task.is_done();
+    const reusable = scan?.status?.code === 0 && Date.now() < scan.pollAt
+      && (scan.started >= after || (!urgent && Date.now() < scan.watchAt));
+    if (!reusable && (!pending || (visiting && scan.started !== undefined && scan.started < after))) {
+      if (!allowInactive && window()?.active === false) return null;
+      const next = {};
+      next.task = cx.spawn(async cx => {
+        await cx.sleep(25); // Let both listeners for a watch batch join before starting Git.
+        if (!allowInactive && window()?.active === false) return;
+        next.started = Date.now();
+        try {
+          next.status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+        } catch (error) {
+          next.error = error;
+        } finally {
+          const finished = Date.now(), duration = finished - next.started;
+          const delay = duration < 500 ? 0 : Math.min(60000, 5 * duration);
+          next.watchAt = finished + delay;
+          next.pollAt = finished + Math.max(10000, delay);
+          if (next.status?.code !== 0 && scans.get(repo) === next) scans.delete(repo);
+        }
+      });
+      scans.set(repo, next);
+      scan = next;
+    }
+    // Resume through our own host task, so another copy's close cannot cancel our follow-up work.
+    while (current() && !scan.pollAt && !scan.task.is_done()) await cx.sleep(50);
+    if (!current()) return null;
+    if (!scan.pollAt) continue; // The scanning copy closed or reloaded.
+    return scan;
+  }
+  return null;
+}
+
 // Where the focused pane is now: its live folder, its machine, its space and pane.
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -148,15 +192,30 @@ export default class Files extends View {
       this.root = view.root; this.on = view.on ?? null;
       this.context = { key: "view", cwd: view.root, on: this.on };
       this.show(view.file, cx);
-      // Follows saves, as the panel does: the folder watch (on this computer) and every 10 s.
-      this.watch(view.root, cx);
-      cx.timer.every(10000, cx => this.reread(cx));
+      // Follows saves, as the panel does: the folder watch (on this computer) and every 10 s
+      // while the window is in front.
+      this.watch(view.root, this.context, cx);
+      cx.timer.every(10000, cx => { if (window()?.active !== false) this.reread(cx); });
       return;
     }
     // Cache files not written for a month go; one still needed is written again.
     if (!checking()) exec("find", [`${appHome()}/${CACHE}`, "-type", "f", "-mtime", "+30", "-delete"]).catch(() => {});
     this.refresh(cx);
-    cx.timer.every(10000, cx => this.refresh(cx));
+    cx.timer.every(500, cx => this.refreshIfDue(cx));
+  }
+
+  // Refreshes when it's time, as the shipped panel does: after a save the watch saw (no sooner
+  // than the last scan allows: a slow repo waits longer), every 10 s otherwise, and never while
+  // the window isn't in front. Coming back to the window catches up on what was missed.
+  refreshIfDue(cx) {
+    const active = window()?.active !== false, context = this.context;
+    const refocused = active && this.windowActive === false;
+    this.windowActive = active;
+    if (!context || this.view) return;
+    if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
+    if (!active || this.loading) return;
+    const now = Date.now();
+    if (context.catchUp || (context.dirtyAt && now >= context.watchAt) || now >= context.pollAt) this.refresh(cx);
   }
 
   // What the panel shows now. `root`: the picked worktree while the pick holds, else the
@@ -230,23 +289,29 @@ export default class Files extends View {
     setShared(SHARED_KEY, value);
   }
 
-  watch(root, cx) {
-    if (this.on || this.watched === root) return;
-    this.watched = root;
-    const context = this.context;
+  // Watches the shown folder (on this computer only). A new watch, or a new context, cancels
+  // the old one, so a folder no longer shown is not watched.
+  watch(root, context, cx) {
+    if (context.on || context.watch?.root === root) return;
+    context.watch?.pending?.cancel();
+    const watch = { root };
+    context.watch = watch;
     cx.spawn(async cx => {
       try {
-        while (this.context === context) {
-          const changed = await watchFolder(root);
-          if (!this.current(context)) continue;
+        while (this.context === context && context.watch === watch) {
+          watch.pending = watchFolder(root);
+          const changed = await watch.pending;
+          if (!changed.length || context.watch !== watch || !this.current(context)) continue;
           // Images from a changed path are copied again (not on every refresh: they aren't read
           // again otherwise). A returned root path means everything under it.
-          const hit = (abs) => (changed ?? []).some(p => p === abs || inside(abs, p));
+          const hit = (abs) => changed.some(p => p === abs || inside(abs, p));
           if (this.staleWhere((on, abs) => !on && hit(abs))) this.wantMedia = true;
-          if (this.view) this.reread(cx); else this.refresh(cx);
+          if (this.view) { this.reread(cx); continue; }
+          context.dirtyAt = Date.now() + 1;
+          this.refreshIfDue(cx);
         }
       }
-      catch { if (this.context === context) this.watched = null; }
+      catch { if (context.watch === watch) context.watch = null; }
     });
   }
 
@@ -275,36 +340,74 @@ export default class Files extends View {
     // Ask git again each time: a checkout can appear, move or go between refreshes.
     if (tg.cwd) this.ask(tg.on, tg.cwd, cx);
     const root = tg.root ?? null, on = tg.on, next = this.key(tg);
-    if (next !== this.context?.key) {
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+    const visiting = next !== this.context?.key;
+    if (visiting) {
+      if (this.context) {
+        this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+        this.context.watch?.pending?.cancel();
+      }
       const saved = this.saved.get(next);
-      this.context = { key: next, cwd: root, on }; this.root = root; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.context = { key: next, cwd: root, on, dirtyAt: 0 }; this.root = root; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
+      this.pending = new Set(); this.marks = {}; this.show(null); this.error = null; this.limited = false;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx);
     }
-    if (!root || this.loading) return;
     const context = this.context;
+    const now = Date.now();
+    // No folder, or git hasn't answered for it yet (that answer refreshes): look again in 10 s.
+    if (!root) {
+      context.catchUp = false;
+      context.dirtyAt = 0;
+      context.pollAt = now + 10000;
+      return;
+    }
+    if (this.loading) return;
+    if (context.catchUp && !context.dirtyAt) context.dirtyAt = now + 1;
+    // The git scan this refresh needs: one started after the change it follows (any recent one
+    // for a plain poll). A new folder or a catch-up wants a fresh one.
+    const request = {
+      after: visiting ? now + 1 : context.dirtyAt || (context.lastStatus ?? -1) + 1,
+      visiting,
+      urgent: visiting || context.catchUp,
+      allowInactive: visiting,
+    };
+    context.catchUp = false;
+    context.pollAt = context.watchAt = now + 10000;
     this.loading = true;
     this.limited = false;
     cx.spawn(async cx => {
       try {
+        this.watch(root, context, cx);
+        const dirtyAtListing = context.dirtyAt;
         for (const path of ["", ...this.folders]) {
           if (!this.current(context)) return;
           await this.loadFolder(path, context);
         }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: root, on }).catch(() => null);
+        if (!this.current(context)) return;
         const marks = {};
+        let covered = dirtyAtListing;
         if (top?.code === 0) {
-          // Writes nothing under .git (index lock, fsmonitor cookie): the folder watch would refresh again.
-          const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on }).catch(() => null);
+          // One scan for this repo, shared with the Changes panel; slow repos are scanned less often.
+          const repo = top.stdout.trim();
+          const scan = await repoStatus(repo, on, request, cx, () => this.context === context);
+          if (!scan || !this.current(context)) return;
+          const { status, started, pollAt, watchAt } = scan;
+          context.lastStatus = started;
+          context.pollAt = pollAt;
+          context.watchAt = watchAt;
+          covered = Math.min(dirtyAtListing, started);
+          if (request.urgent && request.after > started) context.catchUp = true;
           if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
             const xy = entry.slice(0, 2);
-            marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
+            marks[`${repo}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
           }
+        } else {
+          context.watchAt = Date.now();
         }
         if (!this.current(context)) return;
-        this.marks = marks; this.error = null; this.watch(root, cx);
+        if (context.dirtyAt <= covered) context.dirtyAt = 0;
+        this.marks = marks; this.error = null;
         // The open file follows its saves (an agent writing a doc): read again, rebuilt only if changed.
         if (this.file) await this.readFile(this.file, context, cx).catch(() => {});
       } catch (e) { if (this.current(context)) this.error = String(e); }
@@ -365,7 +468,7 @@ export default class Files extends View {
       this.lines = null; this.pop = null; // a new source view has no selection
       this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
         value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
-        font_family: settings().font_family, font_size: 12,
+        font_family: settings().font_family, font_size: settings().font_size,
         syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
       cx?.notify(); // the text shows now; drawings follow
       if (kind === "svg") this.staleWhere((on, abs) => on === (context.on ?? null) && abs === `${context.cwd}/${path}`);
@@ -967,6 +1070,7 @@ export default class Files extends View {
     if (this.view) return this.renderView(theme());
     const tg = this.target();
     if (this.key(tg) !== this.context?.key) this.refresh(cx);
+    else this.refreshIfDue(cx);
     this.publish(tg);
     const t = theme();
     const waiting = tg.cwd && tg.root === undefined;
