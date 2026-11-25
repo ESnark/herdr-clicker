@@ -19,6 +19,13 @@ in the middle, a hidden Files and Changes panel on the right. It changes three p
     input of the agent in the focused pane.
   - HTML files: a button opens the file in your web browser.
 
+Clicker also brings text that is copied on another machine to this computer's clipboard.
+Herdr can show panes that run on another computer through SSH. A program in such a pane
+copies to the clipboard of that computer, so you can't paste the text here. Clicker reads the
+clipboard of the computer that the focused pane runs on, every second, and copies new text
+here. It does this while the Herdr window is in front, and for 15 seconds after you switch to
+another app. Text over 1 MiB stays on the other computer.
+
 See [RECIPE.md](RECIPE.md) for what it looks like, how it behaves and how it is built.
 
 ## Herdr version
@@ -55,8 +62,9 @@ copied images there.
   runs `git status` while the Herdr window is in the background.
 - `sh`: to list the files in a folder.
 - `find`: to delete cache files that were not used for 30 days.
-- `base64`: to copy images from another machine. Herdr can show panes that run on another
-  computer through SSH; an image there comes over as base64 text.
+- `base64`: to copy images from another machine. An image there comes over as base64 text.
+- `pbpaste` (macOS), `wl-paste` or `xclip` (Linux), `cksum`: on another machine, to read its
+  clipboard. The text comes over only when its checksum changed.
 
 Opening a Markdown file never uses the network. An image on the web shows as a link that
 opens in your browser.

@@ -51,6 +51,20 @@ one waiting on you, a blue dot for one that finished while you weren't looking, 
 one working. Agents you have already looked at get none. The most urgent come first, so past
 5 the spinners drop first. The folded rail keeps its single dot.
 
+**Clipboard from another machine.** A program in a pane on another machine copies to that
+machine's clipboard: Herdr's terminals there have no `SSH_CONNECTION`, so it doesn't know it
+is far away. Herdr passes OSC 52 from those terminals to this clipboard, but only some
+programs send it. So the Spaces mod (always shown) reads the clipboard of the focused pane's
+machine every second and copies new text here (`mods/clicker-spaces/clipboard.js`).
+- Only changes it sees are copied. The first read, and the first read after focus moves to
+  another machine or after a pause, only note what is there.
+- It reads while the window is in front, and for 15 s after it goes to the back, so you can
+  copy there and paste in another app.
+- One way only: nothing goes from here to the other machine. Text over 1 MiB stays there.
+- The other machine sends only a checksum (`cksum`) unless the text changed.
+- On a machine with a desktop, text copied at that desktop comes over too, while a pane on
+  that machine has the focus.
+
 **Files panel.**
 - *Worktrees.* In a git repo the header shows a select with the shown worktree's branch.
   It lists "Follow focused pane" and every worktree of the focused pane's repo
@@ -122,7 +136,9 @@ one working. Agents you have already looked at get none. The most urgent come fi
   scan and stops while the window isn't in front), `sh` (folder
   listing, as shipped), `find` (when the panel starts, removes cache files not written for
   30 days), `base64` (images on
-  another machine, up to 512 KB), `open` / `xdg-open` (`mailto` links).
+  another machine, up to 512 KB), `open` / `xdg-open` (`mailto` links), `pbpaste` /
+  `wl-paste` / `xclip` and `cksum` (the clipboard of another machine; with `xclip`, a missing
+  `DISPLAY` is taken as `:0` and `XAUTHORITY` is looked for).
 - Diagrams: `mods/clicker-files/vendor/beautiful-mermaid.js`, beautiful-mermaid 1.1.3 with
   elkjs and entities bundled into one ES module by bun and patched for the mod runtime
   (the patches are listed at its top). `mermaid.js` loads it on the first diagram (about a

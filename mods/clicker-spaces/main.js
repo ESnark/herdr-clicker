@@ -1,6 +1,7 @@
 // clicker-spaces: modified from Herdr's shipped `spaces` mod (herdrdev/herdr-app, Apache-2.0).
 // Changes: resting the pointer on a space shows a card of its agents to the right; click one to focus it.
 // Each row ends with up to 5 marks for its agents that are working, need you, or finished unseen.
+// It also runs the clipboard sync (./clipboard.js): this list is always shown.
 //
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
 // grouped by machine when more than one is known. After a space's name, the repo
@@ -10,6 +11,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, HoverCard } from "gpui-base";
 import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { startClipboardSync } from "./clipboard.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -158,6 +160,7 @@ export default class Spaces extends View {
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // Refresh only when the refs could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+    startClipboardSync(cx);
   }
 
   checkNew(cx) {
